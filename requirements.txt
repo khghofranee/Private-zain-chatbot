@@ -1,3 +1,4 @@
+nest_asyncio
 llama-index
 llama-cloud
 llama-index-agent-openai
@@ -19,7 +20,9 @@ llama-index-readers-microsoft-onedrive
 llama-index-llms-ollama
 llama-index-embeddings-ollama
 llama-index-vector-stores-qdrant
-llama-index-readers-structured-data
+langchain-core
+lama-index-readers-structured-data
+langsmith
 aiohappyeyeballs
 sentence-transformers
 aiohttp
@@ -29,7 +32,7 @@ alembic
 annotated-types
 anyio
 openpyxl
-torch
+torch "transformers<4.50
 python-pptx
 Pillow
 xlrd
