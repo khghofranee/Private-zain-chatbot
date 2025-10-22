@@ -7,15 +7,16 @@ def setup_async_compatibility():
         import nest_asyncio
         import asyncio
 
+        # Always apply nest_asyncio in deployment environments
         deployment_indicators = [
             "gunicorn" in sys.modules,
             "uvicorn" in sys.modules,
-            "DYNO" in os.environ,
-            "RAILWAY_ENVIRONMENT" in os.environ,
-            "VERCEL" in os.environ,
-            "AWS_LAMBDA_FUNCTION_NAME" in os.environ,
-            "GOOGLE_CLOUD_PROJECT" in os.environ,
-            "RENDER" in os.environ,
+            "DYNO" in os.environ,  # Heroku
+            "RAILWAY_ENVIRONMENT" in os.environ,  # Railway
+            "VERCEL" in os.environ,  # Vercel
+            "AWS_LAMBDA_FUNCTION_NAME" in os.environ,  # AWS Lambda
+            "GOOGLE_CLOUD_PROJECT" in os.environ,  # Google Cloud
+            "RENDER" in os.environ,  # Render
             any(
                 indicator in str(sys.argv)
                 for indicator in ["gunicorn", "uvicorn", "waitress"]
@@ -60,6 +61,7 @@ def setup_async_compatibility():
         return True
 
 
+# Apply this BEFORE any other imports
 setup_async_compatibility()
 # importations
 import sys
@@ -476,7 +478,7 @@ class LlamaCloudParseHelper:
                     logger.info(
                         "Detected async-related error, will use isolated parsing mode"
                     )
-                    self.use_isolated_parsing = True
+                    self.use_isolated_parsing = False
                 else:
                     self.available = False
 
