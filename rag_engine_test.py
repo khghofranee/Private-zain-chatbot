@@ -434,53 +434,21 @@ class LlamaCloudParseHelper:
         self.available = bool(self.api_key)
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.parser = None
 
-        # FIX: Define async_mode BEFORE using it
-        self.async_mode = os.getenv("ASYNC_COMPATIBILITY_MODE", "standard")
-        self.use_isolated_parsing = self.async_mode == "isolated_only"
-        # END FIX
-
-        if self.available:
-            try:
-                # Use the same options as your LlamaCloud playground snippet
-                self.parser = LlamaParse(
-                    api_key=self.api_key,
-                    num_workers=4,
-                    verbose=False,
-                    language="en",
-                    # Important parse options to preserve tables & page boundaries
-                    parse_mode="parse_page_with_agent",
-                    model="openai-gpt-4-1-mini",
-                    high_res_ocr=True,
-                    adaptive_long_table=True,
-                    outlined_table_extraction=True,
-                    output_tables_as_HTML=True,
-                    page_separator="\n\n---\n\n",
-                )
-                logger.info(
-                    "LlamaParse (llama-cloud-services) initialized with playground-like options."
-                )
-            except Exception as e:
-                logger.warning(f"LlamaParse init failed: {e}")
-                # Check if it's an async-related error
-                if any(
-                    keyword in str(e).lower()
-                    for keyword in [
-                        "asyncio",
-                        "event loop",
-                        "async",
-                        "await",
-                        "coroutine",
-                        "nested",
-                    ]
-                ):
-                    logger.info(
-                        "Detected async-related error, will use isolated parsing mode"
-                    )
-                    self.use_isolated_parsing = False
-                else:
-                    self.available = False
+        # DON'T store a parser instance - just store config
+        self.parser_config = {
+            "api_key": self.api_key,
+            "num_workers": 1,
+            "verbose": False,
+            "language": "en",
+            "parse_mode": "parse_page_with_agent",
+            "model": "openai-gpt-4-1-mini",
+            "high_res_ocr": True,
+            "adaptive_long_table": True,
+            "outlined_table_extraction": True,
+            "output_tables_as_HTML": True,
+            "page_separator": "\n\n---\n\n",
+        }
 
     def _remove_cache(self, paths: Dict[str, Path]):
         for p in paths.values():
@@ -648,127 +616,6 @@ class LlamaCloudParseHelper:
 
         return docs
 
-    def _isolated_parse(self, file_path: str):
-        """Fallback isolated parsing when direct parsing fails due to async issues"""
-        safe_file_path = file_path.replace('"', '\\"').replace("'", "\\'")
-        safe_api_key = self.api_key.replace('"', '\\"').replace("'", "\\'")
-        safe_cwd = os.getcwd().replace('"', '\\"').replace("'", "\\'")
-
-        temp_script_content = f'''import sys
-        import os
-        import json
-        import traceback
-
-        sys.path.insert(0, "{safe_cwd}")
-
-        def isolated_parse():
-            try:
-                from llama_cloud_services import LlamaParse
-
-                parser = LlamaParse(
-                    api_key="{safe_api_key}",
-                    num_workers=4,
-                    verbose=False,
-                    language="en",
-                    parse_mode="parse_page_with_agent",
-                    model="openai-gpt-4-1-mini",
-                    high_res_ocr=True,
-                    adaptive_long_table=True,
-                    outlined_table_extraction=True,
-                    output_tables_as_HTML=True,
-                    page_separator="\\n\\n---\\n\\n",
-                )
-
-                result = parser.parse("{safe_file_path}")
-
-                # Prefer using result.pages (contains md, text, structuredData)
-                pages = []
-                if hasattr(result, "pages") and result.pages:
-                    for i, page in enumerate(result.pages, start=1):
-                        md = getattr(page, "md", None) or getattr(page, "text", "") or ""
-                        pages.append({{"page": i, "md": md}})
-                else:
-                    md_docs = result.get_markdown_documents(split_by_page=True)
-                    if md_docs:
-                        for i, d in enumerate(md_docs, start=1):
-                            pages.append({{"page": i, "md": getattr(d, "text", "") or ""}})
-                    else:
-                        txt_docs = result.get_text_documents(split_by_page=True)
-                        for i, d in enumerate(txt_docs, start=1):
-                            pages.append({{"page": i, "md": getattr(d, "text", "") or ""}})
-
-                total_pages = len(pages)
-                return {{"success": True, "pages": pages, "total_pages": total_pages}}
-
-            except Exception as e:
-                return {{"success": False, "error": str(e), "traceback": traceback.format_exc()}}
-
-        if __name__ == "__main__":
-            res = isolated_parse()
-            print(json.dumps(res, ensure_ascii=False))
-'''
-
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".py", delete=False, encoding="utf-8"
-            ) as f:
-                f.write(temp_script_content)
-                temp_script_path = f.name
-
-            try:
-                env = os.environ.copy()
-                env["PYTHONPATH"] = os.getcwd()
-
-                logger.debug(f"Using isolated parsing for {Path(file_path).name}")
-
-                result = subprocess.run(
-                    [sys.executable, temp_script_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                    env=env,
-                    cwd=os.getcwd(),
-                )
-
-                if result.returncode != 0:
-                    error_msg = f"Isolated parse failed with code {result.returncode}"
-                    if result.stderr:
-                        error_msg += f": {result.stderr}"
-                    raise RuntimeError(error_msg)
-
-                try:
-                    parse_result = json.loads(result.stdout.strip())
-                except json.JSONDecodeError as e:
-                    logger.error(
-                        f"Failed to parse JSON from isolated process: {result.stdout[:500]}..."
-                    )
-                    raise RuntimeError(f"JSON decode error: {e}")
-
-                if not parse_result.get("success"):
-                    error_msg = parse_result.get("error", "Unknown error")
-                    if parse_result.get("traceback"):
-                        logger.debug(
-                            f"Isolated parse traceback: {parse_result['traceback']}"
-                        )
-                    raise RuntimeError(f"Isolated parse failed: {error_msg}")
-
-                return parse_result
-
-            finally:
-                try:
-                    os.unlink(temp_script_path)
-                except Exception:
-                    pass
-
-        except subprocess.TimeoutExpired:
-            logger.error(f"Isolated parse timed out for {Path(file_path).name}")
-            raise RuntimeError(f"Parse timeout for {Path(file_path).name}")
-        except Exception as e:
-            logger.error(
-                f"Isolated parse execution failed for {Path(file_path).name}: {str(e)}"
-            )
-            raise
-
     def parse_file(
         self, file_path: str, force_reparse: bool = False
     ) -> List[LlamaDocument]:
@@ -777,7 +624,7 @@ class LlamaCloudParseHelper:
 
         paths = self._cache_paths(file_path)
 
-        # Serve from cache if valid and not forcing reparse
+        # Check cache first...
         if not force_reparse and self._is_cache_valid(paths, file_path):
             try:
                 json_obj = json.loads(paths["json"].read_text(encoding="utf-8"))
@@ -793,66 +640,48 @@ class LlamaCloudParseHelper:
                     f"Cache read failed for {file_path}, reparsing. Reason: {e}"
                 )
 
-        # If forcing, remove old cache before parsing
         if force_reparse:
             self._remove_cache(paths)
 
-        # Try direct parsing first, fall back to isolated if needed
+        # CREATE FRESH PARSER INSTANCE FOR EACH FILE
+        # This ensures fresh coroutines every time
         try:
-            if self.use_isolated_parsing:
-                # Use isolated parsing directly
-                parse_result = self._isolated_parse(file_path)
-                pages = parse_result.get("pages", [])
-                total_pages = parse_result.get("total_pages", len(pages))
-            else:
-                # Try direct parsing with the original approach
-                result = self.parser.parse(file_path)
-                md_docs = result.get_markdown_documents(split_by_page=True)
-                total_pages = len(md_docs)
+            logger.info(f"Creating fresh parser for {Path(file_path).name}")
+            parser = LlamaParse(**self.parser_config)
 
-                pages: List[Dict[str, Any]] = []
-                if total_pages == 0:
-                    # Fallback to text documents
-                    txt_docs = result.get_text_documents(split_by_page=True)
-                    total_pages = len(txt_docs)
-                    logger.warning(
-                        f"[Parse] {Path(file_path).name}: markdown empty, fell back to text; pages={total_pages}"
-                    )
-                    for i, d in enumerate(txt_docs, start=1):
-                        page_text = getattr(d, "text", "") or ""
-                        pages.append({"page": i, "md": page_text})
-                else:
-                    for i, d in enumerate(md_docs, start=1):
-                        page_md = getattr(d, "text", "") or ""
-                        pages.append({"page": i, "md": page_md})
+            # Parse with fresh parser
+            result = parser.parse(file_path)
+
+            # Process results
+            md_docs = result.get_markdown_documents(split_by_page=True)
+            total_pages = len(md_docs)
+
+            pages: List[Dict[str, Any]] = []
+            if total_pages == 0:
+                txt_docs = result.get_text_documents(split_by_page=True)
+                total_pages = len(txt_docs)
+                logger.warning(
+                    f"[Parse] {Path(file_path).name}: markdown empty, fell back to text; pages={total_pages}"
+                )
+                for i, d in enumerate(txt_docs, start=1):
+                    page_text = getattr(d, "text", "") or ""
+                    pages.append({"page": i, "md": page_text})
+            else:
+                for i, d in enumerate(md_docs, start=1):
+                    page_md = getattr(d, "text", "") or ""
+                    pages.append({"page": i, "md": page_md})
 
         except Exception as e:
-            # If direct parsing fails and we haven't tried isolated yet, try isolated
-            if not self.use_isolated_parsing:
-                logger.warning(
-                    f"Direct parsing failed for {file_path}: {e}. Trying isolated parsing..."
-                )
-                try:
-                    parse_result = self._isolated_parse(file_path)
-                    pages = parse_result.get("pages", [])
-                    total_pages = parse_result.get("total_pages", len(pages))
-                    # Set flag for future files
-                    self.use_isolated_parsing = True
-                except Exception as e2:
-                    logger.error(
-                        f"Both direct and isolated parsing failed for {file_path}: {e2}"
-                    )
-                    return []
-            else:
-                logger.error(f"Isolated parsing failed for {file_path}: {e}")
-                return []
+            logger.error(f"Fresh parser failed for {file_path}: {e}")
+            return []
 
-        # Process the results (same as original)
+        # Rest of processing remains the same...
         usable_pages = [
             p
             for p in pages
             if isinstance(p.get("md"), str) and len((p.get("md") or "").strip()) >= 5
         ]
+
         if total_pages == 0 or len(usable_pages) == 0:
             logger.warning(
                 f"[Parse] {Path(file_path).name}: empty parse (pages={total_pages}). Not caching."
@@ -877,7 +706,9 @@ class LlamaCloudParseHelper:
     ) -> List[LlamaDocument]:
         all_docs: List[LlamaDocument] = []
         for f in files:
-            all_docs.extend(self.parse_file(f, force_reparse=force_reparse))
+            # Each file gets its own fresh parser instance
+            docs = self.parse_file(f, force_reparse=force_reparse)
+            all_docs.extend(docs)
         return all_docs
 
 
